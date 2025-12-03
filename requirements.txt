@@ -5,3 +5,4 @@ azure-core
 azure-identity
 python-dotenv
 pyaudio
+pip install rich==13.7.1
