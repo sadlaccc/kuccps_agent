@@ -1,3 +1,7 @@
-streamlit==1.38.0
-azure-ai-voicelive==1.0.0
-azure-core==1.30.2
+streamlit
+nest_asyncio
+azure-ai-voicelive
+azure-core
+azure-identity
+python-dotenv
+pyaudio
