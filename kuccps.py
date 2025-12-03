@@ -1,141 +1,124 @@
-# app.py
 import streamlit as st
 from azure.ai.projects import AIProjectClient
-from azure.identity import DefaultAzureCredential
 from azure.ai.agents.models import ListSortOrder
+from azure.core.credentials import AzureKeyCredential
 import time
 
 # ===========================
-# Page Configuration
+# Configuration (API Key)
 # ===========================
-st.set_page_config(
-    page_title="Azure AI Agent - Caldas Cheruyot",
-    page_icon="robot",
-    layout="centered"
-)
-
-st.title("Azure AI Agent Chat")
-st.markdown("**Agent ID:** `asst_G60gsFHCdLuQSaOb44EXyPiZ` | Powered by Azure AI Foundry")
+ENDPOINT = "https://caldascheruyot-6384-resource.services.ai.azure.com/api/projects/caldascheruyot-6384"
+API_KEY = "84s5Fp3rpWWo6kvRKbHohzkS6SEVYaGXrJeHbnBZUITlFtCHM36EJQQJ99BJACHYHv6XJ3w3AAAAACOGB2xd"
+AGENT_ID = "asst_G60gsFHCdLuQSaOb44EXyPiZ"
 
 # ===========================
-# Initialize Azure Client (cached)
+# Page Config
+# ===========================
+st.set_page_config(page_title="Agent560 Chat", page_icon="robot", layout="centered")
+st.title("Agent560 Chat")
+st.caption("Powered by your Azure AI Project • API Key authenticated")
+
+# ===========================
+# Initialize Client (cached)
 # ===========================
 @st.cache_resource
-def get_project_client():
-    credential = DefaultAzureCredential()
-    client = AIProjectClient(
-        credential=credential,
-        endpoint="https://caldascheruyot-6384-resource.services.ai.azure.com/api/projects/caldascheruyot-6384"
-    )
-    agent = client.agents.get_agent("asst_G60gsFHCdLuQSaOb44EXyPiZ")
+def get_client():
+    credential = AzureKeyCredential(API_KEY)
+    client = AIProjectClient(credential=credential, endpoint=ENDPOINT)
+    agent = client.agents.get_agent(AGENT_ID)
     return client, agent
 
-client, agent = get_project_client()
+client, agent = get_client()
 
 # ===========================
-# Session State Management
+# Session State
 # ===========================
 if "thread_id" not in st.session_state:
     st.session_state.thread_id = None
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
 # ===========================
-# Create New Thread
+# Create Thread
 # ===========================
-def create_new_thread():
+def create_thread():
     thread = client.agents.threads.create()
     st.session_state.thread_id = thread.id
-    st.session_state.chat_history = []
-    st.success(f"New conversation started! Thread ID: `{thread.id}`")
+    st.session_state.messages = []
+    return thread.id
 
-# Start new conversation if none exists
-if st.session_state.thread_id is None:
-    create_new_thread()
+if not st.session_state.thread_id:
+    with st.spinner("Starting new conversation..."):
+        create_thread()
+    st.success("Ready to chat!")
 
 # ===========================
-# Sidebar: Controls
+# Sidebar
 # ===========================
 with st.sidebar:
-    st.header("Conversation")
+    st.header("Controls")
     if st.button("New Chat", type="primary", use_container_width=True):
-        create_new_thread()
+        create_thread()
+        st.success("New conversation started!")
         st.rerun()
-
-    st.info(f"**Thread ID:**\n`{st.session_state.thread_id}`")
-    st.caption("Connected to Azure AI Project: caldascheruyot-6384")
+    st.info(f"Thread ID: `{st.session_state.thread_id}`")
 
 # ===========================
-# Display Chat Messages
+# Display Chat History
 # ===========================
-for msg in st.session_state.chat_history:
+for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
 # ===========================
 # Chat Input
 # ===========================
-if prompt := st.chat_input("Ask the agent anything..."):
-    # Add user message
-    st.session_state.chat_history.append({"role": "user", "content": prompt})
+if prompt := st.chat_input("Type your message..."):
+    # Show user message
+    st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Send to Azure AI Agent
+    # Send to Agent
     with st.chat_message("assistant"):
-        with st.spinner("Agent is thinking..."):
+        with st.spinner("Agent560 is thinking..."):
             try:
-                # 1. Add message to thread
+                # 1. Add message
                 client.agents.messages.create(
                     thread_id=st.session_state.thread_id,
                     role="user",
                     content=prompt
                 )
 
-                # 2. Create and run the agent
+                # 2. Run agent
                 run = client.agents.runs.create_and_process(
                     thread_id=st.session_state.thread_id,
                     agent_id=agent.id
                 )
 
-                # Optional: poll if needed (create_and_process usually waits)
+                # Poll until complete (just in case)
                 while run.status in ["queued", "running"]:
                     time.sleep(1)
-                    run = client.agents.runs.get(
-                        thread_id=st.session_state.thread_id,
-                        run_id=run.id
-                    )
+                    run = client.agents.runs.get(thread_id=st.session_state.thread_id, run_id=run.id)
 
                 if run.status == "failed":
-                    st.error(f"Agent failed: {run.last_error}")
-                    st.session_state.chat_history.append(
-                        {"role": "assistant", "content": "*Sorry, something went wrong.*"}
-                    )
+                    st.error(f"Run failed: {run.last_error}")
+                    response = "_Sorry, I encountered an error._"
                 else:
-                    # 3. Get latest messages
+                    # 3. Get response
                     messages = client.agents.messages.list(
                         thread_id=st.session_state.thread_id,
                         order=ListSortOrder.ASCENDING
                     )
-
-                    assistant_response = ""
+                    response = "No response"
                     for msg in messages:
                         if msg.role == "assistant" and msg.text_messages:
-                            assistant_response = msg.text_messages[-1].text.value
+                            response = msg.text_messages[-1].text.value
 
-                    if assistant_response:
-                        st.markdown(assistant_response)
-                        st.session_state.chat_history.append(
-                            {"role": "assistant", "content": assistant_response}
-                        )
-                    else:
-                        st.warning("No response received.")
-                        st.session_state.chat_history.append(
-                            {"role": "assistant", "content": "*No response from agent.*"}
-                        )
+                # Display & save assistant reply
+                st.markdown(response)
+                st.session_state.messages.append({"role": "assistant", "content": response})
 
             except Exception as e:
                 st.error(f"Error: {str(e)}")
-                st.session_state.chat_history.append(
-                    {"role": "assistant", "content": "*An error occurred.*"}
-                )
+                st.session_state.messages.append({"role": "assistant", "content": "_Something went wrong._"})
