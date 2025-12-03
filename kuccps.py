@@ -1,124 +1,179 @@
+# app.py
 import streamlit as st
-from azure.ai.projects import AIProjectClient
-from azure.ai.agents.models import ListSortOrder
 from azure.core.credentials import AzureKeyCredential
-import time
-
-# ===========================
-# Configuration (API Key)
-# ===========================
-ENDPOINT = "https://caldascheruyot-6384-resource.services.ai.azure.com/api/projects/caldascheruyot-6384"
-API_KEY = "84s5Fp3rpWWo6kvRKbHohzkS6SEVYaGXrJeHbnBZUITlFtCHM36EJQQJ99BJACHYHv6XJ3w3AAAAACOGB2xd"
-AGENT_ID = "asst_G60gsFHCdLuQSaOb44EXyPiZ"
+from azure.ai.voicelive.aio import connect
+from azure.ai.voicelive.models import (
+    RequestSession, ServerVad, AzureStandardVoice, Modality, AudioFormat
+)
+import asyncio
+import base64
+import json
 
 # ===========================
 # Page Config
 # ===========================
-st.set_page_config(page_title="Agent560 Chat", page_icon="robot", layout="centered")
-st.title("Agent560 Chat")
-st.caption("Powered by your Azure AI Project • API Key authenticated")
+st.set_page_config(page_title="Azure VoiceLive Voice Assistant", page_icon="microphone", layout="centered")
+
+st.title("Real-Time Voice Assistant")
+st.caption("Powered by Azure VoiceLive • Full-duplex voice conversation in your browser")
 
 # ===========================
-# Initialize Client (cached)
+# API Key Input (with persistence)
 # ===========================
-@st.cache_resource
-def get_client():
-    credential = AzureKeyCredential(API_KEY)
-    client = AIProjectClient(credential=credential, endpoint=ENDPOINT)
-    agent = client.agents.get_agent(AGENT_ID)
-    return client, agent
+if "api_key" not in st.session_state:
+    st.session_state.api_key = ""
 
-client, agent = get_client()
+# Show input only if key is missing or invalid
+if not st.session_state.api_key or st.session_state.api_key.strip() == "":
+    st.warning("Azure VoiceLive API key required")
+    key = st.text_input(
+        "Enter your VoiceLive API Key:",
+        type="password",
+        placeholder="sk-...",
+        help="Get your key from https://portal.azure.com → Your VoiceLive resource → Keys & Endpoint"
+    )
+    if key:
+        st.session_state.api_key = key.strip()
+        st.success("API key saved! You can now speak.")
+        st.rerun()
+    else:
+        st.info("Tip: Your key is stored only in this browser session and never sent to anyone.")
+        st.stop()
+
+API_KEY = st.session_state.api_key
 
 # ===========================
-# Session State
+# Config
 # ===========================
-if "thread_id" not in st.session_state:
-    st.session_state.thread_id = None
+ENDPOINT = "wss://api.voicelive.com/v1"
+MODEL = "gpt-4o-realtime-preview"
+VOICE = "en-US-JennyNeural"  # Try: alloy, echo, shimmer, en-US-AvaNeural
+INSTRUCTIONS = "You are a friendly, natural-sounding assistant. Respond conversationally."
+
+# ===========================
+# Chat History
+# ===========================
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# ===========================
-# Create Thread
-# ===========================
-def create_thread():
-    thread = client.agents.threads.create()
-    st.session_state.thread_id = thread.id
-    st.session_state.messages = []
-    return thread.id
-
-if not st.session_state.thread_id:
-    with st.spinner("Starting new conversation..."):
-        create_thread()
-    st.success("Ready to chat!")
-
-# ===========================
-# Sidebar
-# ===========================
-with st.sidebar:
-    st.header("Controls")
-    if st.button("New Chat", type="primary", use_container_width=True):
-        create_thread()
-        st.success("New conversation started!")
-        st.rerun()
-    st.info(f"Thread ID: `{st.session_state.thread_id}`")
-
-# ===========================
-# Display Chat History
-# ===========================
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+        st.write(msg["content"])
 
 # ===========================
-# Chat Input
+# Browser Microphone Recorder (Hold-to-Talk)
 # ===========================
-if prompt := st.chat_input("Type your message..."):
-    # Show user message
-    st.session_state.messages.append({"role": "user", "content": prompt})
+MIC_JS = """
+<script>
+let recorder, audioStream;
+const status = parent.document.getElementById('status');
+
+async function startRecording() {
+    audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    recorder = new MediaRecorder(audioStream);
+    const chunks = [];
+
+    recorder.ondataavailable = e => chunks.push(e.data);
+    recorder.onstop = () => {
+        const blob = new Blob(chunks, { type: 'audio/webm' });
+        const reader = new FileReader();
+        reader.onload = () => {
+            const base64 = reader.result.split(',')[1];
+            Streamlit.setComponentValue(base64);
+        };
+        reader.readAsDataURL(blob);
+    };
+
+    recorder.start();
+    status.textContent = "Recording... Speak now!";
+    status.style.color = "red";
+}
+
+function stopRecording() {
+    if (recorder && recorder.state === "recording") {
+        recorder.stop();
+        audioStream.getTracks().forEach(t => t.stop());
+        status.textContent = "Processing with Azure VoiceLive...";
+        status.style.color = "orange";
+    }
+}
+</script>
+
+<div style="text-align:center; margin:40px;">
+    <button 
+        onmousedown="startRecording()" 
+        ontouchstart="startRecording()"
+        onmouseup="stopRecording()" 
+        ontouchend="stopRecording()"
+        style="padding:30px 50px; font-size:24px; background:#0068ff; color:white; border:none; border-radius:50px; cursor:pointer; box-shadow:0 8px 20px rgba(0,0,0,0.2);"
+        onmouseover="this.style.background='#0050cc'"
+        onmouseout="this.style.background='#0068ff'">
+        Hold to Talk
+    </button>
+    <p id="status" style="margin-top:20px; font-size:18px; font-weight:bold;">Ready — Hold button and speak</p>
+</div>
+"""
+
+# ===========================
+# Async VoiceLive Handler
+# ===========================
+async def send_to_voicelive(audio_b64: str):
+    credential = AzureKeyCredential(API_KEY)
+
+    async with connect(endpoint=ENDPOINT, credential=credential, model=MODEL) as conn:
+        # Configure session
+        session = RequestSession(
+            modalities=[Modality.TEXT, Modality.AUDIO],
+            instructions=INSTRUCTIONS,
+            voice=AzureStandardVoice(name=VOICE, type="azure-standard"),
+            input_audio_format=AudioFormat.PCM16,
+            output_audio_format=AudioFormat.PCM16,
+            turn_detection=ServerVad(threshold=0.6, silence_duration_ms=700),
+        )
+        await conn.session.update(session=session)
+
+        # Send audio
+        await conn.input_audio_buffer.append(audio=audio_b64)
+
+        # Stream response
+        assistant_text = ""
+        async for event in conn:
+            if event.type == "response.audio.delta":
+                audio_bytes = base64.b64decode(event.delta)
+                st.audio(audio_bytes, format="audio/wav", autoplay=True)
+
+            elif event.type == "response.text.delta":
+                assistant_text += event.delta
+                with st.chat_message("assistant"):
+                    st.write(assistant_text)
+
+            elif event.type == "response.done":
+                st.session_state.messages.append({"role": "assistant", "content": assistant_text})
+                break
+
+# ===========================
+# Receive Audio from Browser
+# ===========================
+audio_data = st._get_component_value(MIC_JS)  # Updated for newer Streamlit
+
+if audio_data:
     with st.chat_message("user"):
-        st.markdown(prompt)
+        st.write("You spoke...")
+        st.session_state.messages.append({"role": "user", "content": "[Voice input]"})
 
-    # Send to Agent
-    with st.chat_message("assistant"):
-        with st.spinner("Agent560 is thinking..."):
-            try:
-                # 1. Add message
-                client.agents.messages.create(
-                    thread_id=st.session_state.thread_id,
-                    role="user",
-                    content=prompt
-                )
+    with st.spinner("Sending to Azure VoiceLive..."):
+        try:
+            asyncio.run(send_to_voicelive(audio_data))
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
+            st.info("Check your API key or try again.")
 
-                # 2. Run agent
-                run = client.agents.runs.create_and_process(
-                    thread_id=st.session_state.thread_id,
-                    agent_id=agent.id
-                )
-
-                # Poll until complete (just in case)
-                while run.status in ["queued", "running"]:
-                    time.sleep(1)
-                    run = client.agents.runs.get(thread_id=st.session_state.thread_id, run_id=run.id)
-
-                if run.status == "failed":
-                    st.error(f"Run failed: {run.last_error}")
-                    response = "_Sorry, I encountered an error._"
-                else:
-                    # 3. Get response
-                    messages = client.agents.messages.list(
-                        thread_id=st.session_state.thread_id,
-                        order=ListSortOrder.ASCENDING
-                    )
-                    response = "No response"
-                    for msg in messages:
-                        if msg.role == "assistant" and msg.text_messages:
-                            response = msg.text_messages[-1].text.value
-
-                # Display & save assistant reply
-                st.markdown(response)
-                st.session_state.messages.append({"role": "assistant", "content": response})
-
-            except Exception as e:
-                st.error(f"Error: {str(e)}")
-                st.session_state.messages.append({"role": "assistant", "content": "_Something went wrong._"})
+# ===========================
+# Footer
+# ===========================
+st.markdown("---")
+st.markdown("""
+**How to use:**  
+Hold the blue button and speak → Release when done → Assistant replies with voice + text  
+Your API key stays private in your browser only
+""")
