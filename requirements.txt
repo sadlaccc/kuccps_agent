@@ -1,3 +1,4 @@
 streamlit==1.38.0
 azure-identity==1.25.1
 azure-ai-projects==1.0.0
+azure-core==1.30.2
