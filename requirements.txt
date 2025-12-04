@@ -5,4 +5,4 @@ azure-core
 azure-identity
 python-dotenv
 pyaudio
-rich==13.7.1
+
